@@ -1,27 +1,28 @@
 ﻿name: Super Commit
 
 on:
-  workflow_dispatch:
-    inputs:
-      account_env:
-        description: 'GitHub Environment (account) to use'
-        required: false
-        default: 'vinay'
-
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  workflow_dispatch:
+    inputs:
+      account_env:
+        description: "GitHub Environment (account) to use (e.g., vinay, demo)"
+        required: false
+        default: "vinay"
 
 jobs:
   supercommit:
-      environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
+    # Use per-account GitHub Environment for secrets
+    environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     runs-on: ubuntu-latest
 
     # allows dispatching the Auto PR workflow
     permissions:
       contents: write
 
+    # Secrets (still supported exactly as before). Profile file can override via $GITHUB_ENV.
     env:
       JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
       JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -29,7 +30,7 @@ jobs:
       TEMPO_TOKEN: ${{ secrets.TEMPO_TOKEN }}
       TEMPO_AUTHOR_ACCOUNT_ID: ${{ secrets.TEMPO_AUTHOR_ACCOUNT_ID }}
 
-      # Category disabled
+      # Category disabled by default (profile file can set/override)
       TEMPO_CATEGORY_ATTRIBUTE_KEY: ""
       TEMPO_CATEGORY_KEY: ""
       TEMPO_DEFAULT_CATEGORY_VALUE: ""
@@ -45,28 +46,35 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
+      # NEW: optional profile loader (non-secrets) from .github/profiles/<profile>.env
       - name: Load non-secret profile vars
+        shell: bash
         run: |
           PROFILE="${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}"
+          FILE=".github/profiles/${PROFILE}.env"
           echo "Using profile: $PROFILE"
-          if [ -f ".github/profiles/${PROFILE}.env" ]; then
+          if [ -f "$FILE" ]; then
+            echo "Loading $FILE"
             while IFS='=' read -r k v; do
               [ -z "$k" ] && continue
-              if [ "${k#\#}" != "$k" ]; then continue; fi
-              echo "$k=$v" >> $GITHUB_ENV
-            done < ".github/profiles/${PROFILE}.env"
+              case "$k" in \#* ) continue;; esac
+              echo "$k=$v" >> "$GITHUB_ENV"
+            done < "$FILE"
           else
-            echo "Profile file .github/profiles/${PROFILE}.env not found; proceeding with existing env."
+            echo "Profile file not found; continuing with secrets only."
           fi
 
-        with:
-          node-version: '20'
+      # Optional: quick visibility of effective (non-secret) env keys
+      - name: Show effective env (no secrets)
+        run: node scripts/supercommit/printEnv.js || true
 
       - name: Decide if this looks like a Super Commit
         id: gate
@@ -107,7 +115,8 @@ jobs:
         shell: bash
         run: |
           set -e
-          RAW="$JIRA_BASE_URL"
+          RAW="${JIRA_BASE_URL}"
+          # RAW may come from secrets or profile file; normalize either way
           CLEAN="$(printf "%s" "$RAW" | tr -d '\r\n' | sed -E 's/[[:space:]]+//g')"
           CLEAN="$(printf "%s" "$CLEAN" | sed -E 's|/+?$||')"
           CLEAN="$(printf "%s" "$CLEAN" | sed -E 's|(https://[^/]+).*|\1|')"
@@ -126,7 +135,7 @@ jobs:
           echo "HTTP: $CODE"
           head -n 3 /tmp/jira_health_body || true
           if [ "$CODE" -ne 200 ]; then
-            echo "::error::Jira health check failed. Fix JIRA_BASE_URL secret"
+            echo "::error::Jira health check failed. Fix JIRA_BASE_URL (secret or profile .env)"
             exit 1
           fi
           echo "Jira looks healthy."
@@ -176,7 +185,6 @@ jobs:
           echo "[DEBUG] TEMPO_TOKEN set?: $([[ -n \"$TEMPO_TOKEN\" ]] && echo set || echo missing)"
           echo "[DEBUG] TEMPO_AUTHOR_ACCOUNT_ID set?: $([[ -n \"$TEMPO_AUTHOR_ACCOUNT_ID\" ]] && echo set || echo missing)"
 
-          node scripts/supercommit/printEnv.js
           node scripts/supercommit/index.js
 
       - name: Publish Super Commit outputs
@@ -211,5 +219,3 @@ jobs:
               }
             });
             core.info('Dispatched repository_dispatch: supercommit-pr-request')
-
-      # ⛔ Inline PR creation removed — handled by Auto PR workflow via repository_dispatch

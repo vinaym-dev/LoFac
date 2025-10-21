@@ -1,18 +1,17 @@
 ﻿name: Auto PR on push to feature/*
 
 on:
+  repository_dispatch:
+    types: [supercommit-pr-request]
   workflow_dispatch:
     inputs:
       account_env:
-        description: 'GitHub Environment (account) to use'
+        description: "GitHub Environment (account) to use (e.g., vinay, demo)"
         required: false
-        default: 'vinay'
-
-  repository_dispatch:
-    types: [supercommit-pr-request]
+        default: "vinay"
 
 concurrency:
-  group: auto-pr-${{ github.event.client_payload.branch }}
+  group: auto-pr-${{ github.event.client_payload.branch || github.ref_name }}
   cancel-in-progress: true
 
 permissions:
@@ -21,21 +20,57 @@ permissions:
 
 jobs:
   create_pr:
-      environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     # Only run on feature/* branches
-    if: startsWith(github.event.client_payload.branch, 'feature/')
+    if: >
+      (github.event_name == 'repository_dispatch' && startsWith(github.event.client_payload.branch, 'feature/')) ||
+      (github.event_name == 'workflow_dispatch'   && startsWith(github.ref_name, 'feature/'))
+    environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     runs-on: ubuntu-latest
 
+    # Secrets from the selected Environment; profile loader can override JIRA_BASE_URL via $GITHUB_ENV
+    env:
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Load non-secret profile vars (e.g., JIRA_BASE_URL) from .github/profiles/<profile>.env
+      - name: Load non-secret profile vars
+        shell: bash
+        run: |
+          PROFILE="${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}"
+          FILE=".github/profiles/${PROFILE}.env"
+          echo "Using profile: $PROFILE"
+          if [ -f "$FILE" ]; then
+            echo "Loading $FILE"
+            while IFS='=' read -r k v; do
+              [ -z "$k" ] && continue
+              case "$k" in \#* ) continue;; esac
+              echo "$k=$v" >> "$GITHUB_ENV"
+            done < "$FILE"
+          else
+            echo "Profile file not found; continuing with env/secrets."
+          fi
+
       - name: Extract payload
         id: payload
         shell: bash
         run: |
-          echo "branch=${{ github.event.client_payload.branch }}" >> "$GITHUB_OUTPUT"
-          echo "sha=${{ github.event.client_payload.sha }}"       >> "$GITHUB_OUTPUT"
-          echo "message<<EOF"                                    >> "$GITHUB_OUTPUT"
-          echo "${{ github.event.client_payload.message }}"      >> "$GITHUB_OUTPUT"
-          echo "EOF"                                             >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "branch=${{ github.event.client_payload.branch }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.event.client_payload.sha }}"       >> "$GITHUB_OUTPUT"
+            echo "message<<EOF"                                    >> "$GITHUB_OUTPUT"
+            echo "${{ github.event.client_payload.message }}"      >> "$GITHUB_OUTPUT"
+            echo "EOF"                                             >> "$GITHUB_OUTPUT"
+          else
+            # workflow_dispatch fallback for manual testing
+            echo "branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "sha=${GITHUB_SHA}"         >> "$GITHUB_OUTPUT"
+            echo "message=Manual run"        >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Guard – skip merge commits
         if: ${{ startsWith(steps.payload.outputs.message, 'Merge') }}
@@ -43,7 +78,7 @@ jobs:
           echo "Merge commit detected; skipping."
           exit 0
 
-      - name: Verify commit message contains Validate Test
+      - name: Verify commit message targets Validate Test
         id: statuscheck
         shell: bash
         run: |
@@ -101,19 +136,24 @@ jobs:
           BRANCH: ${{ steps.payload.outputs.branch }}
           BASE: ${{ steps.vars.outputs.base }}
           KEY: ${{ steps.vars.outputs.key }}
+          JIRA_BASE_URL: ${{ env.JIRA_BASE_URL }}
         with:
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
             const branch = process.env.BRANCH;
             const base = process.env.BASE;
             const key = process.env.KEY || branch;
+
+            const site = (process.env.JIRA_BASE_URL || '').replace(/\/+$/,'');
+            const jiraLine = key && site ? `Jira: ${site}/browse/${key}` : '';
+
             const title = `${key} - Auto PR (Build → Validate Test)`;
             const body = [
               `Auto-created PR for **${key}** after Build → Validate Test transition.`,
               '',
               `Branch: ${branch}`,
-              `Jira: ${{ env.JIRA_BASE_URL }}/browse/${key}`
-            ].join('\n');
+              jiraLine
+            ].filter(Boolean).join('\n');
 
             const pr = await github.rest.pulls.create({
               owner, repo, title, head: branch, base, body

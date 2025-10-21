@@ -1,49 +1,60 @@
 ﻿name: Super Commit on PR approval
 
 on:
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       account_env:
-        description: 'GitHub Environment (account) to use'
+        description: "GitHub Environment (account) to use (e.g., vinay, demo)"
         required: false
-        default: 'vinay'
-
-  pull_request_review:
-    types: [submitted]
+        default: "vinay"
 
 jobs:
   on_approval:
-      environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     if: >
       github.event.review.state == 'approved' &&
       startsWith(github.event.pull_request.head.ref, 'feature/')
+    environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     runs-on: ubuntu-latest
+
+    # Provide the same secrets as before (from the selected Environment).
+    # Values exported by the profile loader step to $GITHUB_ENV will override as needed.
+    env:
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      TEMPO_TOKEN: ${{ secrets.TEMPO_TOKEN }}
+      TEMPO_AUTHOR_ACCOUNT_ID: ${{ secrets.TEMPO_AUTHOR_ACCOUNT_ID }}
+      DRY_RUN: "false"
 
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 2
 
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      # NEW: Load non-secret profile vars (e.g., JIRA_BASE_URL, Ready field config, Tempo keys)
       - name: Load non-secret profile vars
+        shell: bash
         run: |
           PROFILE="${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}"
+          FILE=".github/profiles/${PROFILE}.env"
           echo "Using profile: $PROFILE"
-          if [ -f ".github/profiles/${PROFILE}.env" ]; then
+          if [ -f "$FILE" ]; then
+            echo "Loading $FILE"
             while IFS='=' read -r k v; do
               [ -z "$k" ] && continue
-              if [ "${k#\#}" != "$k" ]; then continue; fi
-              echo "$k=$v" >> $GITHUB_ENV
-            done < ".github/profiles/${PROFILE}.env"
+              case "$k" in \#* ) continue;; esac
+              echo "$k=$v" >> "$GITHUB_ENV"
+            done < "$FILE"
           else
-            echo "Profile file .github/profiles/${PROFILE}.env not found; proceeding with existing env."
+            echo "Profile file not found; continuing with secrets only."
           fi
-
-        with:
-          node-version: '20'
 
       - name: Derive Jira key from branch
         id: vars
@@ -55,16 +66,11 @@ jobs:
           else
             echo "key=" >> $GITHUB_OUTPUT
           fi
+          echo "Branch: $BRANCH ; Issue key: $(cat $GITHUB_OUTPUT | sed -n 's/^key=//p')"
 
       - name: Transition Build → Validate Test (no Tempo log)
         if: ${{ steps.vars.outputs.key != '' }}
         env:
-          # Synthetic message: just drive the transition; LOG:0h means no Tempo call
+          # Synthetic message to drive the transition; LOG:0h means skip Tempo
           COMMIT_MESSAGE: "${{ steps.vars.outputs.key }} STATUS:Validate Test LOG:0h COMMENT:Auto transition on PR approval"
-          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
-          TEMPO_TOKEN: ${{ secrets.TEMPO_TOKEN }}
-          TEMPO_AUTHOR_ACCOUNT_ID: ${{ secrets.TEMPO_AUTHOR_ACCOUNT_ID }}
-          DRY_RUN: "false"
         run: node scripts/supercommit/index.js
