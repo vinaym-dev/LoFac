@@ -52,6 +52,11 @@ setStepOutput("create_pr", "no");
 // ---- HTTP helpers -----------------------------------------------------------
 
 async function jiraFetch(path, opts = {}) {
+    // [fix] Clear error if base URL isn't set to avoid confusing network errors
+    if (!env.jiraApiBase) {
+        throw new Error("[Jira] JIRA_BASE_URL is empty. Set it in repo/environment secrets.");
+    }
+
     const url = `${env.jiraApiBase}${path}`;
     const headers = {
         "Authorization": `Basic ${Buffer.from(`${env.email}:${env.token}`).toString("base64")}`,
@@ -68,7 +73,8 @@ async function jiraFetch(path, opts = {}) {
 }
 
 async function getIssueMinimal(issueKey) {
-    const res = await jiraFetch(`/rest/api/3/issue/${issueKey}?fields=status`);
+    // [fix] URL-encode issueKey in path segments
+    const res = await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=status`);
     const json = await res.json();
     return {
         id: json?.id,
@@ -77,13 +83,15 @@ async function getIssueMinimal(issueKey) {
 }
 
 async function getTransitions(issueKey) {
-    const res = await jiraFetch(`/rest/api/3/issue/${issueKey}/transitions`);
+    // [fix] URL-encode issueKey in path segments
+    const res = await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`);
     const json = await res.json();
     return json?.transitions ?? [];
 }
 
 async function applyTransition(issueKey, transitionId) {
-    await jiraFetch(`/rest/api/3/issue/${issueKey}/transitions`, {
+    // [fix] URL-encode issueKey in path segments
+    await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`, {
         method: "POST",
         body: JSON.stringify({ transition: { id: String(transitionId) } })
     });
@@ -98,7 +106,7 @@ async function updateReadyField(issueKey, readyValueBool) {
     }
 
     const yesLabel = env.readyYesValue || "Yes";
-    const noLabel = (yesLabel.toLowerCase() === "yes") ? "No" : "No";
+    const noLabel = (yesLabel.toLowerCase() === "yes") ? "No" : "No"; // keeping your original logic
     const label = readyValueBool ? yesLabel : noLabel;
 
     const bodiesByType = {
@@ -123,7 +131,8 @@ async function updateReadyField(issueKey, readyValueBool) {
     let lastErr = null;
     for (const body of candidateBodies) {
         try {
-            await jiraFetch(`/rest/api/3/issue/${issueKey}`, {
+            // [fix] URL-encode issueKey in path segments
+            await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}`, {
                 method: "PUT",
                 body: JSON.stringify(body)
             });
@@ -156,7 +165,8 @@ async function addJiraCommentADF(issueKey, message) {
             ]
         }
     };
-    await jiraFetch(`/rest/api/3/issue/${issueKey}/comment`, {
+    // [fix] URL-encode issueKey in path segments
+    await jiraFetch(`/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`, {
         method: "POST",
         body: JSON.stringify(adf)
     });

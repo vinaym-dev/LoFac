@@ -93,3 +93,64 @@ test("multiple PHASE tokens -> error", () => {
         /Only one PHASE token/i
     );
 });
+
+//
+// ---- Additional hardening tests (backward-compatible) ---------------------
+//
+
+// READY normalization variants
+test("READY true variants", () => {
+    const r1 = parseCommitMessage("ABC-1 READY:Yes");
+    const r2 = parseCommitMessage("ABC-1 READY:true");
+    const r3 = parseCommitMessage("ABC-1 READY:1");
+    const r4 = parseCommitMessage("ABC-1 READY:Y");
+    assert.equal(r1.ready, true);
+    assert.equal(r2.ready, true);
+    assert.equal(r3.ready, true);
+    assert.equal(r4.ready, true);
+});
+
+test("READY false variants", () => {
+    const r1 = parseCommitMessage("ABC-1 READY:No");
+    const r2 = parseCommitMessage("ABC-1 READY:false");
+    const r3 = parseCommitMessage("ABC-1 READY:0");
+    const r4 = parseCommitMessage("ABC-1 READY:N");
+    assert.equal(r1.ready, false);
+    assert.equal(r2.ready, false);
+    assert.equal(r3.ready, false);
+    assert.equal(r4.ready, false);
+});
+
+// LOG formats: minutes and h:mm
+test("LOG minutes format", () => {
+    const r = parseCommitMessage("ABC-1 LOG:90m@2025-10-10");
+    assert.equal(r.logHours, 1.5);
+    assert.equal(r.logDate, "2025-10-10");
+});
+
+test("LOG h:mm format", () => {
+    const r = parseCommitMessage("ABC-1 LOG:1:45@2025-10-11");
+    assert.equal(r.logHours, 1.75);
+    assert.equal(r.logDate, "2025-10-11");
+});
+
+// DATE without LOG should be accepted and reflected as logDate with null hours
+test("DATE without LOG", () => {
+    const r = parseCommitMessage("ABC-1 DATE:2025-10-12");
+    assert.equal(r.logHours, null);
+    assert.equal(r.logDate, "2025-10-12");
+});
+
+// CAT alias maps to phase when PHASE missing
+test("CAT alias populates phase when PHASE absent", () => {
+    const r = parseCommitMessage("ABC-1 CAT:QA");
+    assert.equal(r.phase, "QA");
+});
+
+// Token boundary: COMMENT with HTTP: should not be misparsed as a token boundary
+test("COMMENT containing 'HTTP:' does not break token parsing", () => {
+    const r = parseCommitMessage("ABC-1 COMMENT:Fix HTTP:500 retry handler LOG:1h@2025-10-13");
+    assert.equal(r.comment, "Fix HTTP:500 retry handler");
+    assert.equal(r.logHours, 1);
+    assert.equal(r.logDate, "2025-10-13");
+});

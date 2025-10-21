@@ -18,6 +18,35 @@ export const statusMap = {
     CertifyRelease: "Certify and Release",
 };
 
+// [fix] small helper: normalized base url and basic fetch with retries for 429/5xx
+function cleanBase(url) {
+    return String(url || "").trim().replace(/\/+$/, "");
+}
+
+async function jiraFetch(baseUrl, path, headers, init = {}) {
+    const url = `${cleanBase(baseUrl)}${path}`;
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const res = await fetch(url, { ...init, headers });
+        if (res.ok) return res;
+
+        // retry on 429/5xx
+        if (res.status === 429 || res.status >= 500) {
+            if (attempt < maxRetries) {
+                const ra = Number(res.headers.get("retry-after"));
+                const waitMs = Number.isFinite(ra) ? ra * 1000 : 400 * (attempt + 1);
+                console.warn(`[Jira] ${res.status} ${res.statusText} → retrying in ${waitMs}ms`);
+                await new Promise(r => setTimeout(r, waitMs));
+                continue;
+            }
+        }
+        return res; // give back error for caller to handle/log body
+    }
+}
+
+/**
+ * Transition a Jira issue to the status indicated by `statusToken`.
+ */
 export async function updateJiraStatus({
     baseUrl,          // e.g. https://<your>.atlassian.net
     email,            // Jira user email
@@ -33,7 +62,10 @@ export async function updateJiraStatus({
         return { skipped: true };
     }
 
-    const targetStatus = statusMap[statusToken] || statusToken; // allow direct status names too
+    // [fix] normalize token and apply mapping
+    const desired = String(statusToken).trim();
+    const targetStatus = statusMap[desired] || desired; // allow direct status names too
+
     const headers = {
         Authorization: authHeader(email, token),
         Accept: "application/json",
@@ -42,10 +74,10 @@ export async function updateJiraStatus({
 
     // 1) Get current status (optional, just for logs)
     {
-        const res = await fetch(`${baseUrl}/rest/api/3/issue/${issueKey}?fields=status`, { headers });
-        if (!res.ok) {
-            const body = await asJson(res);
-            console.warn(`[Jira] Could not read current status (${res.status}).`, body);
+        const res = await jiraFetch(baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}?fields=status`, headers);
+        if (!res?.ok) {
+            const body = res ? await asJson(res) : {};
+            console.warn(`[Jira] Could not read current status (${res?.status ?? "n/a"}).`, body);
         } else {
             const info = await res.json();
             console.log(`[Jira] ${issueKey} current status: ${info?.fields?.status?.name}`);
@@ -53,25 +85,23 @@ export async function updateJiraStatus({
     }
 
     // 2) Get available transitions
-    const tRes = await fetch(`${baseUrl}/rest/api/3/issue/${issueKey}/transitions`, { headers });
-    if (!tRes.ok) {
-        const body = await asJson(tRes);
-        throw new Error(`[Jira] transitions fetch failed: ${tRes.status} ${JSON.stringify(body)}`);
+    const tRes = await jiraFetch(baseUrl, `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`, headers);
+    if (!tRes?.ok) {
+        const body = tRes ? await asJson(tRes) : {};
+        throw new Error(`[Jira] transitions fetch failed: ${tRes?.status ?? "n/a"} ${JSON.stringify(body)}`);
     }
     const tJson = await tRes.json();
     const transitions = tJson?.transitions || [];
 
-    // Try to match by target status name (case-insensitive)
-    const match = transitions.find(t =>
-        (t.to?.name || "").toLowerCase() === targetStatus.toLowerCase()
-    ) ||
-        // Fallback: sometimes transition name equals the column name
-        transitions.find(t =>
-            (t.name || "").toLowerCase() === targetStatus.toLowerCase()
-        );
+    // Try to match by target status name (case-insensitive), then by transition name
+    const lower = targetStatus.toLowerCase();
+    const match =
+        transitions.find(t => (t.to?.name || "").trim().toLowerCase() === lower) ||
+        transitions.find(t => (t.name || "").trim().toLowerCase() === lower);
 
     if (!match) {
-        console.warn(`[Jira] No transition found to "${targetStatus}". Available: ${transitions.map(t => `${t.name}->${t.to?.name}`).join(", ")}`);
+        const available = transitions.map(t => `id=${t.id} name="${t.name}" → to="${t.to?.name}"`).join(", ");
+        console.warn(`[Jira] No transition found to "${targetStatus}". Available: ${available || "none"}`);
         return { skipped: true, reason: "no-transition" };
     }
 
@@ -83,15 +113,16 @@ export async function updateJiraStatus({
     }
 
     // 3) Apply transition
-    const postRes = await fetch(`${baseUrl}/rest/api/3/issue/${issueKey}/transitions`, {
-        method: "POST",
+    const postRes = await jiraFetch(
+        baseUrl,
+        `/rest/api/3/issue/${encodeURIComponent(issueKey)}/transitions`,
         headers,
-        body: JSON.stringify({ transition: { id: match.id } }),
-    });
+        { method: "POST", body: JSON.stringify({ transition: { id: match.id } }) }
+    );
 
-    if (!postRes.ok) {
-        const body = await asJson(postRes);
-        throw new Error(`[Jira] transition POST failed: ${postRes.status} ${JSON.stringify(body)}`);
+    if (!postRes?.ok) {
+        const body = postRes ? await asJson(postRes) : {};
+        throw new Error(`[Jira] transition POST failed: ${postRes?.status ?? "n/a"} ${JSON.stringify(body)}`);
     }
 
     console.log(`[Jira] Transition applied to "${match.to?.name}"`);

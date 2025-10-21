@@ -1,28 +1,19 @@
-﻿name: Super Commit
+name: Super Commit
 
 on:
   push:
     branches: ["**"]
   pull_request:
     branches: ["**"]
-  workflow_dispatch:
-    inputs:
-      account_env:
-        description: "GitHub Environment (account) to use (e.g., vinay, demo)"
-        required: false
-        default: "vinay"
 
 jobs:
   supercommit:
-    # Use per-account GitHub Environment for secrets
-    environment: ${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}
     runs-on: ubuntu-latest
 
     # allows dispatching the Auto PR workflow
     permissions:
       contents: write
 
-    # Secrets (still supported exactly as before). Profile file can override via $GITHUB_ENV.
     env:
       JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
       JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
@@ -30,7 +21,7 @@ jobs:
       TEMPO_TOKEN: ${{ secrets.TEMPO_TOKEN }}
       TEMPO_AUTHOR_ACCOUNT_ID: ${{ secrets.TEMPO_AUTHOR_ACCOUNT_ID }}
 
-      # Category disabled by default (profile file can set/override)
+      # Category disabled
       TEMPO_CATEGORY_ATTRIBUTE_KEY: ""
       TEMPO_CATEGORY_KEY: ""
       TEMPO_DEFAULT_CATEGORY_VALUE: ""
@@ -46,35 +37,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
-
-      # NEW: optional profile loader (non-secrets) from .github/profiles/<profile>.env
-      - name: Load non-secret profile vars
-        shell: bash
-        run: |
-          PROFILE="${{ inputs.account_env || vars.ACCOUNT_ENV || 'vinay' }}"
-          FILE=".github/profiles/${PROFILE}.env"
-          echo "Using profile: $PROFILE"
-          if [ -f "$FILE" ]; then
-            echo "Loading $FILE"
-            while IFS='=' read -r k v; do
-              [ -z "$k" ] && continue
-              case "$k" in \#* ) continue;; esac
-              echo "$k=$v" >> "$GITHUB_ENV"
-            done < "$FILE"
-          else
-            echo "Profile file not found; continuing with secrets only."
-          fi
-
-      # Optional: quick visibility of effective (non-secret) env keys
-      - name: Show effective env (no secrets)
-        run: node scripts/supercommit/printEnv.js || true
+          node-version: '20'
 
       - name: Decide if this looks like a Super Commit
         id: gate
@@ -115,8 +82,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          RAW="${JIRA_BASE_URL}"
-          # RAW may come from secrets or profile file; normalize either way
+          RAW="$JIRA_BASE_URL"
           CLEAN="$(printf "%s" "$RAW" | tr -d '\r\n' | sed -E 's/[[:space:]]+//g')"
           CLEAN="$(printf "%s" "$CLEAN" | sed -E 's|/+?$||')"
           CLEAN="$(printf "%s" "$CLEAN" | sed -E 's|(https://[^/]+).*|\1|')"
@@ -135,7 +101,7 @@ jobs:
           echo "HTTP: $CODE"
           head -n 3 /tmp/jira_health_body || true
           if [ "$CODE" -ne 200 ]; then
-            echo "::error::Jira health check failed. Fix JIRA_BASE_URL (secret or profile .env)"
+            echo "::error::Jira health check failed. Fix JIRA_BASE_URL secret"
             exit 1
           fi
           echo "Jira looks healthy."
@@ -158,20 +124,14 @@ jobs:
           echo "== Transitions =="
           curl -sS -H "Authorization: Basic $AUTH" -H "Accept: application/json" "$BASE/rest/api/3/issue/$KEY/transitions" | jq .
 
-      - name: Sanity check Jira /myself from runner
-        if: ${{ steps.gate.outputs.run == 'yes' }}
-        shell: bash
-        run: |
-          BASE="${{ steps.normurl.outputs.resolved }}"
-          AUTH="$(printf "%s:%s" "$JIRA_EMAIL" "$JIRA_API_TOKEN" | base64 -w0 2>/dev/null || printf "%s:%s" "$JIRA_EMAIL" "$JIRA_API_TOKEN" | base64)"
-          curl -i -sS -H "Authorization: Basic $AUTH" "$BASE/rest/api/3/myself" | sed -n '1,40p'
-
       - name: Apply Super Commit (Jira + Tempo)
         id: apply
         if: ${{ github.event_name == 'push' && steps.gate.outputs.run == 'yes' }}
         env:
           JIRA_BASE_URL: ${{ steps.normurl.outputs.resolved }}
+        shell: bash
         run: |
+          set -e
           COMMIT_MESSAGE="$(git log -1 --pretty=%B | tr -d '\r')"
           export COMMIT_MESSAGE
 
@@ -185,12 +145,21 @@ jobs:
           echo "[DEBUG] TEMPO_TOKEN set?: $([[ -n \"$TEMPO_TOKEN\" ]] && echo set || echo missing)"
           echo "[DEBUG] TEMPO_AUTHOR_ACCOUNT_ID set?: $([[ -n \"$TEMPO_AUTHOR_ACCOUNT_ID\" ]] && echo set || echo missing)"
 
+          # Run Node script (it writes create_pr=yes/no to $GITHUB_OUTPUT internally)
           node scripts/supercommit/index.js
+
+          # Make COMMIT_MESSAGE available to later steps (e.g., github-script) ??
+          {
+            echo 'COMMIT_MESSAGE<<EOF'
+            echo "$COMMIT_MESSAGE"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
 
       - name: Publish Super Commit outputs
         if: ${{ steps.gate.outputs.run == 'yes' }}
         run: |
           mkdir -p sc_outputs
+          # default to 'no' if step output is unset
           echo "${{ steps.apply.outputs.create_pr || 'no' }}" > sc_outputs/create_pr.txt
           echo "create_pr=$(cat sc_outputs/create_pr.txt)"
 
@@ -202,20 +171,23 @@ jobs:
           path: sc_outputs/
           if-no-files-found: warn
 
-      # 🚀 Dispatch Auto PR workflow ONLY when requested (no dry-run)
+      # ?? Dispatch Auto PR workflow ONLY when requested (no dry-run)
       - name: Signal Auto PR (repository_dispatch)
         if: ${{ steps.apply.outputs.create_pr == 'yes' && env.DRY_RUN != 'true' }}
         uses: actions/github-script@v7
         with:
           script: |
             const [owner, repo] = process.env.GITHUB_REPOSITORY.split('/');
+            const message = process.env.COMMIT_MESSAGE || '';
             await github.rest.repos.createDispatchEvent({
               owner, repo,
               event_type: 'supercommit-pr-request',
               client_payload: {
                 branch: process.env.GITHUB_REF_NAME,
                 sha: process.env.GITHUB_SHA,
-                message: process.env.COMMIT_MESSAGE
+                message
               }
             });
             core.info('Dispatched repository_dispatch: supercommit-pr-request')
+
+      # ? Inline PR creation removed � handled by Auto PR workflow via repository_dispatch

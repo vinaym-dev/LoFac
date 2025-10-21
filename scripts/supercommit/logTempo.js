@@ -8,7 +8,7 @@
 //   logTempo({ issue, issueId, logHours, logDate, comment, phase, authorAccountId })
 //
 //   // new (preferred by updated index.js)
-//   logTempo({ issueId, hours, when, comment, attributeKey, attributeValue, authorAccountId })
+//   logTempo({ issueId, hours, when, comment, attributeKey, attributeValue, authorAccountId, dryRun })
 //
 // Both forms accept tempoApiToken (or read from env), tempoApiBase (defaults to v4).
 
@@ -34,7 +34,8 @@ function toSeconds(hoursLike) {
 /** Helpers to introspect Tempo work attributes (best-effort). */
 async function getWorkAttributes(tempoApiBase, token) {
     const url = `${tempoApiBase.replace(/\/+$/, "")}/work-attributes`;
-    const res = await fetch(url, { headers: { "Authorization": `Bearer ${token}` } });
+    // [fix] add Accept for consistency
+    const res = await fetch(url, { headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" } });
     if (!res.ok) throw new Error(`[Tempo] ${res.status} ${await res.text()}`);
     return res.json();
 }
@@ -67,7 +68,8 @@ export async function logTempoWorklog({
     startTime = "09:00:00",   // hh:mm:ss
     timeSpentSeconds,         // integer seconds
     authorAccountId,          // required for your tenant
-    attributes = {}           // optional: { "_Category_": "Development", ... }
+    attributes = {},          // optional: { "_Category_": "Development", ... }
+    dryRun = false            // [fix] honor dry-run to match index.js
 }) {
     // fallbacks
     const authorFromEnv = process.env.TEMPO_AUTHOR_ACCOUNT_ID || process.env.JIRA_ACCOUNT_ID;
@@ -106,6 +108,19 @@ export async function logTempoWorklog({
         ...(attributesArray ? { attributes: attributesArray } : {})
     };
 
+    // [fix] DRY RUN early exit
+    if (dryRun) {
+        console.log(`[Tempo][DRY_RUN] Would create worklog:`, {
+            issue: issueKey ?? issueId,
+            startDate: payload.startDate,
+            startTime: payload.startTime,
+            timeSpentSeconds: payload.timeSpentSeconds,
+            authorAccountId: payload.authorAccountId,
+            attributes: attributesArray || []
+        });
+        return { dryRun: true };
+    }
+
     const maxRetries = 3;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -141,9 +156,12 @@ export async function logTempoWorklog({
             }
 
             if (res.status === 429 || res.status >= 500) {
-                const retryAfter = Number(res.headers.get("retry-after")) || 500 * Math.pow(2, attempt - 1);
-                console.warn(`[Tempo] ${res.status} → retrying in ${retryAfter} ms (attempt ${attempt}/${maxRetries})`);
-                await sleep(retryAfter);
+                // [fix] Retry-After (seconds) → ms, fallback to exponential backoff
+                const ra = res.headers.get("retry-after");
+                const raNum = Number(ra);
+                const retryAfterMs = Number.isFinite(raNum) ? raNum * 1000 : 500 * Math.pow(2, attempt - 1);
+                console.warn(`[Tempo] ${res.status} → retrying in ${retryAfterMs} ms (attempt ${attempt}/${maxRetries})`);
+                await sleep(retryAfterMs);
                 continue;
             }
 
@@ -218,6 +236,7 @@ export async function logTempo(args = {}) {
         startDate,
         timeSpentSeconds,
         authorAccountId,
-        attributes
+        attributes,
+        dryRun: !!args.dryRun // [fix] pass through dryRun
     });
 }

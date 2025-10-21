@@ -10,13 +10,16 @@
 //
 // Returns: { issue, issueKey, status, logHours, logDate, comment, phase, ready, firstLine }
 
+const TOKEN_NAMES = ["STATUS", "LOG", "COMMENT", "PHASE", "DATE", "CAT", "READY"];
+const TOKEN_ALT = TOKEN_NAMES.join("|"); // STATUS|LOG|COMMENT|...
+
 function sanitizeFirstLine(message) {
     const rawFirst = String(message ?? "").split(/\r?\n/)[0] ?? "";
     // strip BOM + zero-width chars, then left-trim spaces/tabs; keep trailing spacing intact
     return rawFirst
-        .replace(/^\uFEFF/, "")           // UTF-8 BOM
+        .replace(/^\uFEFF/, "")                // UTF-8 BOM
         .replace(/^[\u200B\u200C\u200D]+/, "") // ZWSP/ZWNJ/ZWJ
-        .replace(/^\s+/, "")              // leading whitespace
+        .replace(/^\s+/, "")                   // leading whitespace
         .trimEnd();
 }
 
@@ -38,14 +41,21 @@ export function parseCommitMessage(message) {
     // ---- helpers ------------------------------------------------------------
     const failFormat = (msg) => { throw new Error(`Super Commit format: ${msg}`); };
 
+    // Count occurrences using the same token boundary as getToken (prevents counting HTTP:, etc.)
     const onlyOne = (name) => {
-        const count = (firstLine.match(new RegExp(String.raw`(?:^|\s)${name}:`, "g")) || []).length;
-        if (count > 1) failFormat(`only one ${name} token is allowed.`);
+        const re = new RegExp(
+            String.raw`(?:^|\s)${name}:\s*([^\s].*?)\s*(?=(?:\s(?:${TOKEN_ALT}):|$))`,
+            "g"
+        );
+        const hits = firstLine.match(re) || [];
+        if (hits.length > 1) failFormat(`only one ${name} token is allowed.`);
     };
 
+    // Capture up to next known token or end of line (not any ALL-CAPS-with-colon)
     const getToken = (name) => {
-        // Capture up to next ALL-CAPS token or end of line
-        const re = new RegExp(String.raw`(?:^|\s)${name}:\s*([^\s].*?)\s*(?=(?:\s[A-Z]+:|$))`);
+        const re = new RegExp(
+            String.raw`(?:^|\s)${name}:\s*([^\s].*?)\s*(?=(?:\s(?:${TOKEN_ALT}):|$))`
+        );
         const m = firstLine.match(re);
         return m ? m[1].trim() : null;
     };
@@ -69,7 +79,7 @@ export function parseCommitMessage(message) {
     const issueKey = issue; // alias for callers that expect issueKey
 
     // ---- uniqueness ---------------------------------------------------------
-    ["STATUS", "LOG", "COMMENT", "PHASE", "DATE", "CAT", "READY"].forEach(onlyOne);
+    TOKEN_NAMES.forEach(onlyOne);
 
     // ---- tokens -------------------------------------------------------------
     const status = tidy(getToken("STATUS"));
